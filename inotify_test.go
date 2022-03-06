@@ -10,7 +10,10 @@ package fsnotify
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -457,5 +460,54 @@ func TestInotifyOverflow(t *testing.T) {
 	if overflows == 0 {
 		t.Fatalf("No overflow and not enough creates (expected %d, got %d)",
 			numDirs*numFiles, creates)
+	}
+}
+
+func TestINotifyNoBlockingSyscalls(t *testing.T) {
+	if os.Getenv("KTHREAD_TEST") == "" {
+		t.Skip("Skipping kernel thread count test")
+	}
+
+	getThreads := func() int {
+		cmd := fmt.Sprintf("ls /proc/%d/task | wc -l", os.Getpid())
+		output, err := exec.Command("/bin/bash", "-c", cmd).Output()
+		if err != nil {
+			t.Fatalf("Failed to execute command to check number of threads, err %s", err)
+		}
+
+		n, err := strconv.ParseInt(strings.Trim(string(output), "\n"), 10, 64)
+		if err != nil {
+			t.Fatalf("Failed to parse output as int, err: %s", err)
+		}
+		return int(n)
+	}
+
+	startingThreads := getThreads()
+
+	for i := 0; i <= 30; i++ {
+		testDir := tempMkdir(t)
+		defer os.RemoveAll(testDir)
+
+		w, err := NewWatcher()
+		if err != nil {
+			t.Fatalf("Failed to create watcher: %v", err)
+		}
+
+		w.Add(testDir)
+	}
+
+	// Bad synchronization mechanism
+	time.Sleep(time.Second * 2)
+
+	endingThreads := getThreads()
+
+	// Did we spawn a significant number of new threads?
+	if diff := endingThreads - startingThreads; diff >= 10 {
+		t.Fatalf("Expected diff<10 but got %v. starting: %v. ending: %v", diff, startingThreads, endingThreads)
+	}
+
+	// Is the Go runtime spawning many more threads than the configured maximum number of threads for user code?
+	if maxprocs := runtime.GOMAXPROCS(0) + 10; maxprocs <= endingThreads {
+		t.Fatalf("Expected %v threads (max procs) but got %v", maxprocs, endingThreads)
 	}
 }
